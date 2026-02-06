@@ -7,7 +7,9 @@
 ![Swift](https://img.shields.io/badge/Swift-6.0-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-(I want to add a screenshot here eventually)
+![Screenshot of GlassTerm in Light Mode](screenshot_light.png)
+
+![Screenshot of GlassTerm in Dark Mode](screenshot_dark.png)
 
 GlassTerm is a terminal emulator for macOS that embraces the Liquid Glass UI of macOS Tahoe, built using the excellent [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) library.  I built this mostly for myself, seeking a simple and lightweight but aesthetically pleasing terminal for my setup.  Configuration options are delibrately limited as a result. 
 
