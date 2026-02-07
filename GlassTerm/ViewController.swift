@@ -267,8 +267,20 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
 
     @objc private func alwaysDarkModeDidChange() {
         configureTerminalAppearance()
+        updateWindowAppearance()
         if #available(macOS 26, *) {
             updateGlassBackground()
+        }
+    }
+
+    /// Updates the window appearance based on "Always Dark Mode" setting
+    private func updateWindowAppearance() {
+        guard let window = view.window else { return }
+        if Self.alwaysDarkMode {
+            window.appearance = NSAppearance(named: .darkAqua)
+        } else {
+            // Reset to nil to follow system appearance
+            window.appearance = nil
         }
     }
 
@@ -707,6 +719,7 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
 
         // Reapply appearance-based settings when the view appears
         configureTerminalAppearance()
+        updateWindowAppearance()
 
         // Setup title edit button
         setupTitleEditButton()
