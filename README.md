@@ -24,6 +24,7 @@ Global options such as font size, style, and default window color scheme are con
 - Tabbing
 - System color schemes for light/dark mode
 - Font customization (style, size)
+- Less than 5MB
 - That's about it (so far)
 
 ## Requirements
