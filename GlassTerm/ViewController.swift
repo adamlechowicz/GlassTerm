@@ -11,6 +11,45 @@ import SwiftTerm
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// LocalProcessTerminalView subclass that accepts file/folder drops from Finder
+/// and types the shell-escaped path(s) into the terminal.
+class DragDropTerminalView: LocalProcessTerminalView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) else {
+            return []
+        }
+        return .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] else {
+            return false
+        }
+
+        let paths = urls.map { shellEscapedPath($0.path) }
+        let text = paths.joined(separator: " ")
+        send(txt: text)
+        return true
+    }
+
+    /// Shell-escapes a file path by wrapping it in single quotes,
+    /// escaping any existing single quotes within the path.
+    private func shellEscapedPath(_ path: String) -> String {
+        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+        return "'\(escaped)'"
+    }
+}
+
 class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUserInterfaceValidations {
     @IBOutlet var loggingMenuItem: NSMenuItem?
 
@@ -172,7 +211,7 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
         terminalContainer = container
 
         // Create terminal filling the container (at origin 0,0)
-        terminal = LocalProcessTerminalView(frame: container.bounds)
+        terminal = DragDropTerminalView(frame: container.bounds)
         terminal.autoresizingMask = [.width, .height]
         terminal.caretColor = .systemGreen
         terminal.getTerminal().setCursorStyle(.steadyBlock)
