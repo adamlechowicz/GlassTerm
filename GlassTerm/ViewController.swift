@@ -11,8 +11,9 @@ import SwiftTerm
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// LocalProcessTerminalView subclass that accepts file/folder drops from Finder
-/// and types the shell-escaped path(s) into the terminal.
+/// LocalProcessTerminalView subclass that adds:
+/// - File/folder drag-and-drop from Finder (types shell-escaped paths)
+/// - Shift+Enter support (sends CSI u sequence for apps like Claude Code)
 class DragDropTerminalView: LocalProcessTerminalView {
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -23,6 +24,8 @@ class DragDropTerminalView: LocalProcessTerminalView {
         super.init(coder: coder)
         registerForDraggedTypes([.fileURL])
     }
+
+    // MARK: - Drag and Drop
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) else {
@@ -230,6 +233,22 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
         FileManager.default.changeCurrentDirectoryPath (FileManager.default.homeDirectoryForCurrentUser.path)
         terminal.startProcess (executable: shell, execName: shellIdiom)
         container.addSubview(terminal)
+
+        // Monitor Shift+Enter to send CSI u encoding (\e[13;2u)
+        // so apps like Claude Code can distinguish it from plain Enter.
+        // Only intercept when the terminal is the first responder (physical keyboard input),
+        // not programmatic events from apps running inside the terminal.
+        keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self,
+                  event.keyCode == 36,
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift),
+                  event.window == self.view.window,
+                  self.view.window?.firstResponder === self.terminal else {
+                return event
+            }
+            self.terminal.send(txt: "\u{1b}[13;2u")
+            return nil // consume the event
+        }
 
         // Configure auto-hiding scroller
         configureScroller()
@@ -461,6 +480,7 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
     private weak var terminalScroller: NSScroller?
     private var scrollerHideTimer: Timer?
     private var isScrollerVisible = false
+    private var keyEventMonitor: Any?
     private var scrollEventMonitor: Any?
     private var isResizing = false
 
@@ -853,7 +873,10 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
         if isViewLoaded {
             view.removeObserver(self, forKeyPath: "effectiveAppearance")
         }
-        // Remove scroll event monitor
+        // Remove event monitors
+        if let monitor = keyEventMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
         if let monitor = scrollEventMonitor {
             NSEvent.removeMonitor(monitor)
         }
