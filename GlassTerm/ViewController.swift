@@ -235,15 +235,12 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
         container.addSubview(terminal)
 
         // Monitor Shift+Enter to send CSI u encoding (\e[13;2u)
-        // so apps like Claude Code can distinguish it from plain Enter.
-        // Only intercept when the terminal is the first responder (physical keyboard input),
-        // not programmatic events from apps running inside the terminal.
+        // so apps like Claude Code can distinguish it from plain Enter
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self,
                   event.keyCode == 36,
-                  event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift),
-                  event.window == self.view.window,
-                  self.view.window?.firstResponder === self.terminal else {
+                  event.modifierFlags.contains(.shift),
+                  event.window == self.view.window else {
                 return event
             }
             self.terminal.send(txt: "\u{1b}[13;2u")
