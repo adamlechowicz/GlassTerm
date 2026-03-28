@@ -51,6 +51,71 @@ class DragDropTerminalView: LocalProcessTerminalView {
         let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
         return "'\(escaped)'"
     }
+
+    // MARK: - Reverse Video Cursor Fix
+
+    /// Sibling view placed behind the terminal that draws opaque fills for inverse-video cells.
+    /// See InverseVideoOverlayView for the full explanation.
+    weak var inverseVideoOverlay: InverseVideoOverlayView?
+
+    /// Propagate invalidation to the overlay so it repaints in sync with the terminal.
+    /// setNeedsDisplay(_:) is `open` in SwiftTerm so this override is legal.
+    override open func setNeedsDisplay(_ invalidRect: NSRect) {
+        super.setNeedsDisplay(invalidRect)
+        inverseVideoOverlay?.setNeedsDisplay(invalidRect)
+    }
+}
+
+// MARK: - Inverse Video Overlay
+
+/// A transparent view placed behind the terminal that paints opaque fills for cells using
+/// reverse video (SGR 7) whose foreground was the default color.
+///
+/// Background: `nativeBackgroundColor = .clear` is required to let the Liquid Glass show through,
+/// but SwiftTerm's `inverseColor()` preserves alpha — so `.clear.inverseColor()` returns
+/// transparent white. Any SGR 7 cell whose fg was `.defaultColor` ends up with an invisible
+/// background fill, making cursors drawn by TUI apps (Claude Code, vim, ncurses menus…)
+/// disappear entirely.
+///
+/// This view is inserted into the terminal container BEFORE the terminal view, so it sits behind
+/// it in z-order. The terminal's transparent cell areas let the overlay's fills show through.
+/// `DragDropTerminalView.setNeedsDisplay(_:)` propagates invalidation here so both repaint
+/// in lock-step.
+class InverseVideoOverlayView: NSView {
+    weak var terminalView: DragDropTerminalView?
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let tv = terminalView else { return }
+        let term = tv.getTerminal()
+        let rows = term.rows
+        let cols = term.cols
+
+        // Mirror SwiftTerm's computeFontDimensions() using the public font property
+        let ctFont = tv.font as CTFont
+        let cellW = tv.font.advancement(forGlyph: tv.font.glyph(withName: "W")).width
+        let cellH = ceil(CTFontGetAscent(ctFont) + CTFontGetDescent(ctFont) + CTFontGetLeading(ctFont))
+
+        // After inversion, the cell background color = the original foreground color.
+        // For .defaultColor fg this resolves to nativeForegroundColor (white/black).
+        tv.nativeForegroundColor.setFill()
+
+        for screenRow in 0..<rows {
+            guard let line = term.getLine(row: screenRow) else { continue }
+            let cellY = frame.height - cellH * CGFloat(screenRow + 1)
+
+            guard dirtyRect.maxY >= cellY && dirtyRect.minY <= cellY + cellH else { continue }
+
+            for col in 0..<cols {
+                let cell = line[col]
+                // Only patch cells where inversion maps .defaultColor fg → transparent fill.
+                // Cells using explicit ANSI colors are already opaque; no fix needed there.
+                guard cell.attribute.style.contains(.inverse),
+                      cell.attribute.fg == .defaultColor else { continue }
+
+                NSBezierPath.fill(NSRect(x: cellW * CGFloat(col), y: cellY, width: cellW, height: cellH))
+            }
+        }
+    }
 }
 
 class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUserInterfaceValidations {
@@ -157,7 +222,7 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
     func processTerminated(source: TerminalView, exitCode: Int32?) {
         view.window?.close()
     }
-    var terminal: LocalProcessTerminalView!
+    var terminal: DragDropTerminalView!
 
     static weak var lastTerminal: LocalProcessTerminalView!
     
@@ -232,6 +297,16 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
 
         FileManager.default.changeCurrentDirectoryPath (FileManager.default.homeDirectoryForCurrentUser.path)
         terminal.startProcess (executable: shell, execName: shellIdiom)
+
+        // Add overlay BEFORE terminal so it sits behind it in z-order.
+        // The overlay draws opaque fills for inverse-video cells; the terminal's
+        // transparent cell backgrounds let those fills show through.
+        let overlay = InverseVideoOverlayView(frame: container.bounds)
+        overlay.autoresizingMask = [.width, .height]
+        container.addSubview(overlay)
+        terminal.inverseVideoOverlay = overlay
+        overlay.terminalView = terminal
+
         container.addSubview(terminal)
 
         // Monitor Shift+Enter to send CSI u encoding (\e[13;2u)
@@ -401,28 +476,23 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
     private func configureTerminalAppearance() {
         guard terminal != nil else { return }
 
-        // Determine if we're in dark mode (forced if "Always Dark Mode" is enabled)
         let isDarkMode = Self.alwaysDarkMode || view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
 
-        // Set completely transparent background
+        // Set completely transparent background so the Liquid Glass shows through
         terminal.nativeBackgroundColor = NSColor.clear
         terminal.wantsLayer = true
         terminal.layer?.backgroundColor = NSColor.clear.cgColor
 
-        // Set foreground color and ANSI palette based on appearance
         if isDarkMode {
-            // Dark mode: white text with standard colors
             terminal.nativeForegroundColor = NSColor.white
             terminal.caretColor = NSColor.white
             terminal.installColors(Self.darkModeColors)
         } else {
-            // Light mode: black text with darker ANSI colors for contrast
             terminal.nativeForegroundColor = NSColor.black
             terminal.caretColor = NSColor.black
             terminal.installColors(Self.lightModeColors)
         }
 
-        // Request redraw
         terminal.needsDisplay = true
     }
 
