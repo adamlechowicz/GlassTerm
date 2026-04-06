@@ -7,6 +7,7 @@
 //
 
 import Cocoa
+import ObjectiveC.runtime
 import SwiftTerm
 import SwiftUI
 import UniformTypeIdentifiers
@@ -15,12 +16,44 @@ import UniformTypeIdentifiers
 /// - File/folder drag-and-drop from Finder (types shell-escaped paths)
 /// - Shift+Enter support (sends CSI u sequence for apps like Claude Code)
 class DragDropTerminalView: LocalProcessTerminalView {
+    private var pendingFilteredInput: [UInt8] = []
+
+    private static let installDrawRectSwizzle: Void = {
+        let originalSelector = #selector(NSView.draw(_:))
+        let swizzledSelector = #selector(glassTerm_draw(_:))
+
+        guard
+            let originalMethod = class_getInstanceMethod(DragDropTerminalView.self, originalSelector),
+            let swizzledMethod = class_getInstanceMethod(DragDropTerminalView.self, swizzledSelector)
+        else { return }
+
+        let didAddMethod = class_addMethod(
+            DragDropTerminalView.self,
+            originalSelector,
+            method_getImplementation(swizzledMethod),
+            method_getTypeEncoding(swizzledMethod)
+        )
+
+        if didAddMethod {
+            class_replaceMethod(
+                DragDropTerminalView.self,
+                swizzledSelector,
+                method_getImplementation(originalMethod),
+                method_getTypeEncoding(originalMethod)
+            )
+        } else {
+            method_exchangeImplementations(originalMethod, swizzledMethod)
+        }
+    }()
+
     override init(frame: CGRect) {
+        _ = Self.installDrawRectSwizzle
         super.init(frame: frame)
         registerForDraggedTypes([.fileURL])
     }
 
     required init?(coder: NSCoder) {
+        _ = Self.installDrawRectSwizzle
         super.init(coder: coder)
         registerForDraggedTypes([.fileURL])
     }
@@ -52,6 +85,106 @@ class DragDropTerminalView: LocalProcessTerminalView {
         return "'\(escaped)'"
     }
 
+    // MARK: - Transparent backing store clear
+
+    /// Clear the dirty region before SwiftTerm draws into the layer-backed view.
+    ///
+    /// Problem: SwiftTerm's drawTerminalContents fills cell backgrounds with the resolved
+    /// NSColor.  For cells whose background resolves to transparent (nativeBackgroundColor
+    /// = .clear, or .clear.inverseColor() for default-inverted cells) the fill is a no-op
+    /// in source-over compositing — old opaque pixels from previous frames accumulate in
+    /// the CALayer backing store and show through as ghost text behind new content.
+    ///
+    /// SwiftTerm declares `draw(_:)` as `public`, not `open`, so a normal Swift override is
+    /// unavailable. We install a subclass-local ObjC swizzle for `draw(_:)` and also keep the
+    /// CALayer delegate hook below, because AppKit can route drawing through either path on macOS.
+    /// Both paths clear only the dirty region, preserving partial redraw performance.
+    ///
+    /// Note: `draw(_ layer:in:)` is NOT `override` because NSView's CALayerDelegate conformance
+    /// is ObjC-only. ObjC dynamic dispatch will find our implementation and call it in place of
+    /// NSView's default. We replicate AppKit's setup (push a NSGraphicsContext wrapping ctx) so
+    /// SwiftTerm's draw(_:) sees a valid NSGraphicsContext.current.
+    func draw(_ layer: CALayer, in ctx: CGContext) {
+        ctx.clear(ctx.boundingBoxOfClipPath)
+        let gc = NSGraphicsContext(cgContext: ctx, flipped: isFlipped)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = gc
+        draw(ctx.boundingBoxOfClipPath)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    @objc private func glassTerm_draw(_ dirtyRect: NSRect) {
+        NSGraphicsContext.current?.cgContext.clear(dirtyRect)
+
+        typealias DrawIMP = @convention(c) (AnyObject, Selector, NSRect) -> Void
+        guard let originalMethod = class_getInstanceMethod(DragDropTerminalView.self, #selector(glassTerm_draw(_:))) else {
+            return
+        }
+
+        let originalDraw = unsafeBitCast(method_getImplementation(originalMethod), to: DrawIMP.self)
+        originalDraw(self, #selector(glassTerm_draw(_:)), dirtyRect)
+    }
+
+    override open func dataReceived(slice: ArraySlice<UInt8>) {
+        pendingFilteredInput.append(contentsOf: slice)
+
+        var output: [UInt8] = []
+        var index = 0
+
+        while index < pendingFilteredInput.count {
+            let remaining = pendingFilteredInput.count - index
+
+            if pendingFilteredInput[index] == 0x1b {
+                if remaining == 1 {
+                    break
+                }
+
+                if pendingFilteredInput[index + 1] == 0x5b {
+                    if remaining < 3 {
+                        break
+                    }
+
+                    var end = index + 2
+                    while end < pendingFilteredInput.count, !(0x40...0x7e).contains(pendingFilteredInput[end]) {
+                        end += 1
+                    }
+
+                    if end == pendingFilteredInput.count {
+                        break
+                    }
+
+                    let sequence = Array(pendingFilteredInput[index...end])
+
+                    // Claude Code enables CSI-u keyboard reporting with sequences like ESC [ > 1 u
+                    // and ESC [ < u. SwiftTerm currently routes any CSI ... u to "restore cursor",
+                    // even when the sequence uses a private prefix, which snaps the cursor back to
+                    // the saved default position and causes subsequent redraws to overwrite earlier
+                    // shell output. Drop unsupported private CSI ... u sequences until SwiftTerm
+                    // handles these extensions correctly.
+                    if sequence.count >= 4, (0x3c...0x3f).contains(sequence[2]), sequence.last == 0x75 {
+                        index = end + 1
+                        continue
+                    }
+
+                    output.append(contentsOf: sequence)
+                    index = end + 1
+                    continue
+                }
+            }
+
+            output.append(pendingFilteredInput[index])
+            index += 1
+        }
+
+        if index > 0 {
+            pendingFilteredInput.removeFirst(index)
+        }
+
+        if !output.isEmpty {
+            feed(byteArray: output[...])
+        }
+    }
+
     // MARK: - Reverse Video Cursor Fix
 
     /// Sibling view placed behind the terminal that draws opaque fills for inverse-video cells.
@@ -60,9 +193,21 @@ class DragDropTerminalView: LocalProcessTerminalView {
 
     /// Propagate invalidation to the overlay so it repaints in sync with the terminal.
     /// setNeedsDisplay(_:) is `open` in SwiftTerm so this override is legal.
+    ///
+    /// We always mark the *entire* terminal as needing display, not just SwiftTerm's row range.
+    /// With a transparent background on macOS Tahoe, partial invalidation still leaves old cells
+    /// in the layer backing store when a TUI app switches buffers or redraws shorter content.
+    /// A full terminal redraw is the reliable way to ensure erased cells actually disappear.
+    ///
+    /// We always mark the *entire* overlay as needing display, not just the dirty rect.
+    /// Reason: the overlay draws opaque fills for inverse-video cells. When a cell leaves
+    /// inverse state, SwiftTerm only invalidates the affected rect. If the overlay only
+    /// redraws that rect, old fills in nearby rows may persist across the clear(dirtyRect)
+    /// call. A full overlay redraw is cheap (one pass over visible cells) and guarantees
+    /// no stale fills survive.
     override open func setNeedsDisplay(_ invalidRect: NSRect) {
-        super.setNeedsDisplay(invalidRect)
-        inverseVideoOverlay?.setNeedsDisplay(invalidRect)
+        super.setNeedsDisplay(bounds)
+        inverseVideoOverlay?.needsDisplay = true
     }
 }
 
@@ -85,6 +230,10 @@ class InverseVideoOverlayView: NSView {
     weak var terminalView: DragDropTerminalView?
 
     override func draw(_ dirtyRect: NSRect) {
+        // Clear dirty rect first: stale white fills from previously-inverse cells would otherwise
+        // persist in the layer backing store after those cells leave inverse-video state.
+        NSGraphicsContext.current?.cgContext.clear(dirtyRect)
+
         guard let tv = terminalView else { return }
         let term = tv.getTerminal()
         let rows = term.rows
@@ -112,7 +261,11 @@ class InverseVideoOverlayView: NSView {
                 guard cell.attribute.style.contains(.inverse),
                       cell.attribute.fg == .defaultColor else { continue }
 
-                NSBezierPath.fill(NSRect(x: cellW * CGFloat(col), y: cellY, width: cellW, height: cellH))
+                // Use the cell's column width (2 for wide/CJK chars, 1 for normal, 0 for
+                // continuation placeholders which should not be filled independently).
+                let colSpan = Int(cell.width)
+                guard colSpan > 0 else { continue }
+                NSBezierPath.fill(NSRect(x: cellW * CGFloat(col), y: cellY, width: cellW * CGFloat(colSpan), height: cellH))
             }
         }
     }
@@ -283,6 +436,14 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
         terminal.autoresizingMask = [.width, .height]
         terminal.caretColor = .systemGreen
         terminal.getTerminal().setCursorStyle(.steadyBlock)
+
+        // GlassTerm uses a transparent background (nativeBackgroundColor = .clear).
+        // On macOS 11+, SwiftTerm enables disableFullRedrawOnAnyChanges to suppress
+        // whole-surface redraws, but this causes stale pixels to linger: "erased" cells
+        // draw transparent fills that don't overwrite the old pixel data in the CALayer
+        // backing store.  Turning the flag off restores the full-surface redraw behavior,
+        // ensuring the system clears the backing store before each draw cycle.
+        terminal.disableFullRedrawOnAnyChanges = false
 
         // Configure terminal for transparent background with adaptive colors
         configureTerminalAppearance()
@@ -480,16 +641,17 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
 
         // Set completely transparent background so the Liquid Glass shows through
         terminal.nativeBackgroundColor = NSColor.clear
-        terminal.wantsLayer = true
         terminal.layer?.backgroundColor = NSColor.clear.cgColor
 
         if isDarkMode {
             terminal.nativeForegroundColor = NSColor.white
             terminal.caretColor = NSColor.white
+            terminal.caretTextColor = NSColor.black
             terminal.installColors(Self.darkModeColors)
         } else {
             terminal.nativeForegroundColor = NSColor.black
             terminal.caretColor = NSColor.black
+            terminal.caretTextColor = NSColor.white
             terminal.installColors(Self.lightModeColors)
         }
 
@@ -1622,4 +1784,3 @@ extension GlassTint {
         }
     }
 }
-
