@@ -185,6 +185,71 @@ class DragDropTerminalView: LocalProcessTerminalView {
         }
     }
 
+    func sendMouseReportingScroll(with event: NSEvent) -> Bool {
+        let term = getTerminal()
+
+        guard allowMouseReporting, term.mouseMode != .off, event.deltaY != 0 else {
+            return false
+        }
+
+        let hit = calculateMouseHit(with: event)
+        let buttonFlag = mouseWheelButtonFlag(for: event)
+        term.sendEvent(
+            buttonFlags: buttonFlag,
+            x: hit.grid.col,
+            y: hit.grid.row,
+            pixelX: hit.pixels.col,
+            pixelY: hit.pixels.row
+        )
+        return true
+    }
+
+    private func mouseWheelButtonFlag(for event: NSEvent) -> Int {
+        let flags = event.modifierFlags
+        let term = getTerminal()
+        var buttonFlag = event.deltaY > 0 ? 64 : 65
+
+        if term.mouseMode.sendsModifiers() {
+            if flags.contains(.shift) {
+                buttonFlag |= 4
+            }
+            if flags.contains(.option) {
+                buttonFlag |= 8
+            }
+            if flags.contains(.control) {
+                buttonFlag |= 16
+            }
+        }
+
+        return buttonFlag
+    }
+
+    private func calculateMouseHit(with event: NSEvent) -> (grid: Position, pixels: Position) {
+        let point = convert(event.locationInWindow, from: nil)
+        let term = getTerminal()
+        let cellSize = terminalCellSize()
+
+        let col = Int(point.x / cellSize.width)
+        let row = Int((bounds.height - point.y) / cellSize.height)
+        let clampedCol = min(max(0, col), max(0, term.cols - 1))
+        let clampedRow = min(max(0, row), max(0, term.rows - 1))
+
+        let pixelX = min(max(Int(point.x), 0), Int(bounds.width))
+        let pixelY = min(max(Int(bounds.height - point.y), 0), Int(bounds.height))
+
+        return (
+            Position(col: clampedCol, row: clampedRow),
+            Position(col: pixelX, row: pixelY)
+        )
+    }
+
+    private func terminalCellSize() -> CGSize {
+        let ctFont = font as CTFont
+        let cellWidth = font.advancement(forGlyph: font.glyph(withName: "W")).width
+        let cellHeight = ceil(CTFontGetAscent(ctFont) + CTFontGetDescent(ctFont) + CTFontGetLeading(ctFont))
+        return CGSize(width: max(1, cellWidth), height: max(1, cellHeight))
+    }
+
     // MARK: - Reverse Video Cursor Fix
 
     /// Sibling view placed behind the terminal that draws opaque fills for inverse-video cells.
@@ -740,6 +805,9 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
                 // Check if the event is within the terminal view
                 let locationInTerminal = terminal.convert(event.locationInWindow, from: nil)
                 if terminal.bounds.contains(locationInTerminal) {
+                    if terminal.sendMouseReportingScroll(with: event) {
+                        return nil
+                    }
                     self.showScroller()
                 }
             }
