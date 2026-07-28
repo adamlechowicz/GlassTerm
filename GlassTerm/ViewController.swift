@@ -372,6 +372,9 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
     /// The hosting view for the SwiftUI Liquid Glass background
     var glassHostingView: NSView?
 
+    /// Layer-backed contrast backing (solid white/black) drawn over the glass and under the terminal
+    var contrastBackingView: NSView?
+
     /// Container view for the terminal (provides padding while keeping terminal at origin 0,0)
     var terminalContainer: NSView?
     
@@ -524,6 +527,10 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
         FileManager.default.changeCurrentDirectoryPath (FileManager.default.homeDirectoryForCurrentUser.path)
         terminal.startProcess (executable: shell, execName: shellIdiom)
 
+        // Answer terminal color / color-scheme queries with appearance-matched colors so CLI apps
+        // pick a compatible light/dark theme (the transparent background otherwise reports black).
+        installColorQueryHandlers()
+
         // Add overlay BEFORE terminal so it sits behind it in z-order.
         // The overlay draws opaque fills for inverse-video cells; the terminal's
         // transparent cell backgrounds let those fills show through.
@@ -573,6 +580,7 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
     @available(macOS 26, *)
     private func setupGlassBackground() {
         updateGlassBackground()
+        setupContrastBacking()
 
         // Observe tint changes to update the glass background
         NotificationCenter.default.addObserver(
@@ -589,9 +597,19 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
             name: ViewController.alwaysDarkModeChangedNotification,
             object: nil
         )
+
+        // Observe window opacity (contrast backing) changes
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowOpacityDidChange),
+            name: .windowOpacityDidChange,
+            object: nil
+        )
     }
 
-    /// Updates the glass background with the current tint color
+    /// Updates the glass background with the current tint color.
+    /// Rebuilds the SwiftUI host; only invoked on tint / dark-mode changes (infrequent),
+    /// so it never runs on the rapid opacity path.
     @available(macOS 26, *)
     private func updateGlassBackground() {
         // Remove existing glass view if present
@@ -611,8 +629,37 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
             hostingView.appearance = NSAppearance(named: .darkAqua)
         }
 
+        // Keep the glass at the very bottom so the contrast backing stays above it.
         view.addSubview(hostingView, positioned: .below, relativeTo: nil)
         glassHostingView = hostingView
+    }
+
+    /// Creates the layer-backed contrast backing view, positioned above the glass and below the terminal.
+    private func setupContrastBacking() {
+        let backing = NSView(frame: view.bounds)
+        backing.wantsLayer = true
+        backing.autoresizingMask = [.width, .height]
+        backing.layer?.cornerRadius = windowCornerRadius
+        backing.layer?.masksToBounds = true
+
+        if let glass = glassHostingView {
+            view.addSubview(backing, positioned: .above, relativeTo: glass)
+        } else {
+            view.addSubview(backing, positioned: .below, relativeTo: nil)
+        }
+        contrastBackingView = backing
+        updateContrastBacking()
+    }
+
+    /// Updates the contrast backing's color (white in light mode, black in dark mode) and opacity
+    /// from the global window-opacity setting. Cheap and crash-safe — this is the only work done
+    /// on the rapid opacity path (no SwiftUI rebuild).
+    private func updateContrastBacking() {
+        guard let layer = contrastBackingView?.layer else { return }
+        let isDarkMode = isEffectiveDarkMode
+        layer.backgroundColor = (isDarkMode ? NSColor.black : NSColor.white).cgColor
+        let maxBacking = isDarkMode ? maxBackingOpacityDark : maxBackingOpacityLight
+        layer.opacity = Float(GlassOpacity.current * maxBacking)
     }
 
     @objc private func glassTintDidChange() {
@@ -621,9 +668,14 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
         }
     }
 
+    @objc private func windowOpacityDidChange() {
+        updateContrastBacking()
+    }
+
     @objc private func alwaysDarkModeDidChange() {
         configureTerminalAppearance()
         updateWindowAppearance()
+        updateContrastBacking()
         if #available(macOS 26, *) {
             updateGlassBackground()
         }
@@ -691,6 +743,7 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
         if keyPath == "effectiveAppearance" {
             configureTerminalAppearance()
+            updateContrastBacking()
         } else {
             super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
         }
@@ -702,7 +755,7 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
     private func configureTerminalAppearance() {
         guard terminal != nil else { return }
 
-        let isDarkMode = Self.alwaysDarkMode || view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let isDarkMode = isEffectiveDarkMode
 
         // Set completely transparent background so the Liquid Glass shows through
         terminal.nativeBackgroundColor = NSColor.clear
@@ -722,6 +775,61 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
 
         terminal.needsDisplay = true
     }
+
+    /// Whether the terminal should use its dark appearance (forced by Always Dark Mode, or the
+    /// view's effective system appearance). Shared by color theming, the contrast backing, and
+    /// the color-query responses so they never disagree.
+    var isEffectiveDarkMode: Bool {
+        Self.alwaysDarkMode || view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
+    // MARK: - Terminal Color Queries
+
+    /// Registers OSC 10/11 handlers so color *queries* are answered with colors that match the
+    /// current light/dark appearance.
+    ///
+    /// Why this is needed: GlassTerm renders with a transparent background
+    /// (`nativeBackgroundColor = .clear`). SwiftTerm converts `.clear` to `Color(0,0,0)` (alpha is
+    /// dropped) and reports that black for `OSC 11;?`, so CLI apps (e.g. GitHub Copilot) always
+    /// detect a *dark* terminal and render dark-theme selections — unreadable against the black
+    /// text GlassTerm draws in light mode. Answering the queries ourselves lets apps pick the
+    /// matching theme. SwiftTerm checks user OSC handlers before its built-ins, so this needs no
+    /// fork. Only foreground/background (10/11) are intercepted; cursor color (OSC 12) is left to
+    /// SwiftTerm so its set behavior is unchanged.
+    private func installColorQueryHandlers() {
+        let term = terminal.getTerminal()
+        term.registerOscHandler(code: 10) { [weak self] data in self?.handleColorQuery(startAt: 0, data: data) }
+        term.registerOscHandler(code: 11) { [weak self] data in self?.handleColorQuery(startAt: 1, data: data) }
+    }
+
+    /// Handles OSC 10/11. Mirrors SwiftTerm's multi-color layout (`startAt` 0 = foreground,
+    /// 1 = background; extra `;`-separated groups advance the role — e.g. `OSC 10;?;?` also reports
+    /// the background). Only `?` *queries* are answered; color *set* requests are intentionally
+    /// ignored so the transparent background and appearance-managed colors are preserved.
+    private func handleColorQuery(startAt: Int, data: ArraySlice<UInt8>) {
+        guard let str = String(bytes: data, encoding: .utf8) else { return }
+        let term = terminal.getTerminal()
+        for (offset, group) in str.split(separator: ";", omittingEmptySubsequences: false).enumerated() {
+            guard group == "?" else { continue }
+            let role = startAt + offset
+            guard let hex = reportedColorHex(role: role) else { continue }
+            term.sendResponse(text: "\u{1b}]\(role + 10);rgb:\(hex)\u{1b}\\")
+        }
+    }
+
+    /// The `rgb:RRRR/GGGG/BBBB` value to report for a color role (0 = foreground, 1 = background,
+    /// 2 = cursor), matching the current appearance and GlassTerm's actual text color.
+    private func reportedColorHex(role: Int) -> String? {
+        let dark = isEffectiveDarkMode
+        let white = "ffff/ffff/ffff"
+        let black = "0000/0000/0000"
+        switch role {
+        case 0, 2: return dark ? white : black   // foreground / cursor
+        case 1:    return dark ? black : white   // background
+        default:   return nil
+        }
+    }
+
 
     /// Helper to create SwiftTerm.Color from 8-bit RGB values
     private static func color8(_ r: UInt16, _ g: UInt16, _ b: UInt16) -> SwiftTerm.Color {
@@ -1193,8 +1301,9 @@ class ViewController: NSViewController, LocalProcessTerminalViewDelegate, NSUser
         super.viewDidLayout()
         changingSize = true
 
-        // Update glass background to cover full view
+        // Update glass background and contrast backing to cover full view
         glassHostingView?.frame = view.bounds
+        contrastBackingView?.frame = view.bounds
 
         // Update container frame for proper titlebar inset and padding
         terminalContainer?.frame = containerFrameWithPadding()
@@ -1626,8 +1735,30 @@ enum GlassTint: String, CaseIterable {
     }
 }
 
+/// Global window opacity / contrast-backing setting.
+///
+/// `0` = pure "Glass" (no backing — the current look); `1` = "Translucent" (maximum backing).
+/// App-wide and persisted in `UserDefaults`, mirroring how `GlassTint.current` provides the
+/// global tint default.
+enum GlassOpacity {
+    /// UserDefaults key for the window opacity / contrast-backing setting
+    static let userDefaultsKey = "WindowOpacity"
+
+    /// Current global opacity value, clamped to `0...1`
+    static var current: Double {
+        get {
+            min(max(UserDefaults.standard.double(forKey: userDefaultsKey), 0), 1)
+        }
+        set {
+            UserDefaults.standard.set(min(max(newValue, 0), 1), forKey: userDefaultsKey)
+            NotificationCenter.default.post(name: .windowOpacityDidChange, object: nil)
+        }
+    }
+}
+
 extension Notification.Name {
     static let glassTintDidChange = Notification.Name("GlassTintDidChange")
+    static let windowOpacityDidChange = Notification.Name("WindowOpacityDidChange")
 }
 
 /// Tint opacity for the glass effect in light mode (0.0 to 1.0)
@@ -1636,6 +1767,14 @@ let glassTintOpacityLight: Double = 0.25
 /// Tint opacity for the glass effect in dark mode (0.0 to 1.0)
 /// Slightly higher since plusLighter/screen can be more subtle on dark backgrounds
 let glassTintOpacityDark: Double = 0.35
+
+/// Maximum contrast-backing opacity at the "Translucent" end of the slider (light mode).
+/// A white layer is composited over the glass to lighten the backing and raise text contrast.
+let maxBackingOpacityLight: Double = 0.45
+
+/// Maximum contrast-backing opacity at the "Translucent" end of the slider (dark mode).
+/// A black layer is composited over the glass to darken the backing and raise text contrast.
+let maxBackingOpacityDark: Double = 0.55
 
 /// A SwiftUI view that provides the Liquid Glass background effect
 @available(macOS 26, *)

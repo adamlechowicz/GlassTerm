@@ -246,9 +246,9 @@
                                             </connections>
                                         </menuItem>
                                         <menuItem isSeparatorItem="YES" id="glass-tint-sep"/>
-                                        <menuItem title="Default Glass Tint" id="glass-tint-menu">
+                                        <menuItem title="Color Tint" id="glass-tint-menu">
                                             <modifierMask key="keyEquivalentModifierMask"/>
-                                            <menu key="submenu" title="Default Glass Tint" id="glass-tint-submenu">
+                                            <menu key="submenu" title="Color Tint" id="glass-tint-submenu">
                                                 <items>
                                                     <menuItem title="Clear (Default)" identifier="clear" id="tint-clear">
                                                         <modifierMask key="keyEquivalentModifierMask"/>

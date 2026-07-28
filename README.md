@@ -15,12 +15,13 @@ GlassTerm is a terminal emulator for macOS that embraces the Liquid Glass UI of 
 
 I built this mostly for myself, seeking a simple and lightweight but aesthetically pleasing terminal for my setup (*It's something nice to look at when debugging your actual code that isn't working!*) Configuration options are delibrately limited as a result. 
 
-Global options such as font size, style, and default window color scheme are configurable via the menu bar.  Hovering over the title bar reveals an "edit" icon that can be used to set custom titles and window colors on a per-window or per-tab basis (useful for quickly distinguishing between multiple open windows).  New tabs can be created using the (⌘+T) keyboard shortcut.
+Global options such as font size, style, default window color scheme, and window opacity are configurable via the menu bar.  Hovering over the title bar reveals an "edit" icon that can be used to set custom titles and window colors on a per-window or per-tab basis (useful for quickly distinguishing between multiple open windows).  New tabs can be created using the (⌘+T) keyboard shortcut.
 
 ## Features
 
 - Transparent Liquid Glass background
 - Optional color tinting (per-window or global)
+- Adjustable window opacity for contrast (Glass ↔ Translucent)
 - Tabbing
 - System color schemes for light/dark mode
 - Font customization (style, size)

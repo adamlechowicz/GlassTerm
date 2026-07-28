@@ -31,6 +31,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         configureEditMenuIcons()
         configureViewMenuIcons()
         configureWindowMenuIcons()
+        configureOpacityMenuItem()
     }
 
     // MARK: - Menu Icon Configuration
@@ -90,7 +91,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ("Smaller", "minus.magnifyingglass"),
             ("Show Fonts…", "textformat"),
             ("Allow Mouse Reporting", "computermouse"),
-            ("Default Glass Tint", "app.background.dotted"),
+            ("Color Tint", "app.background.dotted"),
             ("Always Dark Mode", "moon.fill")
         ]
 
@@ -135,7 +136,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Configures colored circle icons for the Glass Tint submenu items
     private func configureGlassTintSubmenuIcons(in viewMenu: NSMenu) {
-        guard let glassTintItem = viewMenu.item(withTitle: "Default Glass Tint"),
+        guard let glassTintItem = viewMenu.item(withTitle: "Color Tint"),
               let submenu = glassTintItem.submenu else {
             return
         }
@@ -190,6 +191,53 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         image.unlockFocus()
         return image
+    }
+
+    // MARK: - Glass Opacity
+
+    /// Popover currently presenting the opacity slider (retained while visible)
+    private var opacityPopover: NSPopover?
+
+    /// Adds the "Glass Opacity…" item to the View menu; it opens a popover hosting the slider.
+    private func configureOpacityMenuItem() {
+        guard let mainMenu = NSApp.mainMenu,
+              let viewMenu = mainMenu.item(withTitle: "View")?.submenu else {
+            return
+        }
+
+        let item = NSMenuItem(title: "Glass Opacity…", action: #selector(showOpacityPopover(_:)), keyEquivalent: "")
+        item.target = self
+        if let icon = NSImage(systemSymbolName: "circle.righthalf.filled", accessibilityDescription: "Glass Opacity") {
+            icon.isTemplate = true
+            item.image = icon
+        }
+
+        // Place it just after the Color Tint item, grouped with the other glass-appearance controls.
+        if let colorTintItem = viewMenu.item(withTitle: "Color Tint") {
+            viewMenu.insertItem(item, at: viewMenu.index(of: colorTintItem) + 1)
+        } else {
+            viewMenu.addItem(item)
+        }
+    }
+
+    /// Opens a transient popover hosting the opacity slider, anchored to the active window.
+    /// Hosting the slider in a popover (instead of embedding it directly in the menu) keeps
+    /// continuous interaction out of the menu's event-tracking system, which is unreliable for
+    /// live controls.
+    @objc func showOpacityPopover(_ sender: Any?) {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow,
+              let contentView = window.contentView else {
+            return
+        }
+
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = OpacityPopoverViewController()
+        opacityPopover = popover
+
+        // Anchor near the top-center of the active window; the popover drops down from there.
+        let anchor = NSRect(x: contentView.bounds.midX, y: contentView.bounds.maxY - 1, width: 1, height: 1)
+        popover.show(relativeTo: anchor, of: contentView, preferredEdge: .minY)
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {
@@ -254,6 +302,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let window = document.windowControllers.first?.window {
             window.makeKeyAndOrderFront(nil)
         }
+    }
+}
+
+// MARK: - Opacity Popover
+
+/// A small view controller hosting the window-opacity slider, shown in a popover from the View menu.
+/// Because it lives in a popover (a normal window-backed view) rather than an `NSMenuItem`'s custom
+/// view, the slider can safely run continuously for live feedback.
+final class OpacityPopoverViewController: NSViewController {
+    override func loadView() {
+        let width: CGFloat = 240
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 66))
+
+        // Title
+        let titleLabel = NSTextField(labelWithString: "Glass Opacity")
+        titleLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        titleLabel.frame = NSRect(x: 16, y: 40, width: width - 32, height: 18)
+        container.addSubview(titleLabel)
+
+        // Slider (0 = Glass, 1 = Translucent) — continuous is safe inside a popover
+        let slider = NSSlider(
+            value: GlassOpacity.current,
+            minValue: 0,
+            maxValue: 1,
+            target: self,
+            action: #selector(sliderChanged(_:))
+        )
+        slider.isContinuous = true
+        slider.frame = NSRect(x: 16, y: 20, width: width - 32, height: 20)
+        container.addSubview(slider)
+
+        // End labels describing the slider range
+        let glassLabel = makeCaptionLabel("Glass", alignment: .left)
+        glassLabel.frame = NSRect(x: 16, y: 4, width: 90, height: 14)
+        container.addSubview(glassLabel)
+
+        let translucentLabel = makeCaptionLabel("Translucent", alignment: .right)
+        translucentLabel.frame = NSRect(x: width - 106, y: 4, width: 90, height: 14)
+        container.addSubview(translucentLabel)
+
+        self.view = container
+    }
+
+    /// Updates the global setting (persists + posts .windowOpacityDidChange) as the slider moves.
+    @objc private func sliderChanged(_ sender: NSSlider) {
+        GlassOpacity.current = sender.doubleValue
+    }
+
+    /// Creates a small secondary-color caption label for the slider ends
+    private func makeCaptionLabel(_ text: String, alignment: NSTextAlignment) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 10)
+        label.textColor = .secondaryLabelColor
+        label.alignment = alignment
+        return label
     }
 }
 
