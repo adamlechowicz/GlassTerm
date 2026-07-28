@@ -11,7 +11,7 @@
 
 ![Screenshot of GlassTerm in Dark Mode](images/screenshot_dark.png)
 
-GlassTerm is a terminal emulator for macOS that embraces the Liquid Glass UI of macOS Tahoe, built using the excellent [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) library.  
+GlassTerm is a terminal emulator for macOS that embraces the Liquid Glass UI of macOS, built using the excellent [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) library.  
 
 I built this mostly for myself, seeking a simple and lightweight but aesthetically pleasing terminal for my setup (*It's something nice to look at when debugging your actual code that isn't working!*) Configuration options are delibrately limited as a result. 
 
